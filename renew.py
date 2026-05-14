@@ -114,35 +114,57 @@ class ACLCloudsAPI:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
 
-    def _get_captcha_token(self):
-        """GET 登录页，从 HTML / JS 里提取 captcha_token"""
-        log("获取登录页 captcha_token ...")
-        r = self.session.get(LOGIN_URL, timeout=20)
-        r.raise_for_status()
-
-        # 先从 XSRF-TOKEN cookie 里拿（后续请求要带）
+    def _set_xsrf(self):
+        """从 cookie 里取 XSRF-TOKEN，URL decode 后放进请求头"""
+        from urllib.parse import unquote
         xsrf = self.session.cookies.get("XSRF-TOKEN", "")
         if xsrf:
-            self.session.headers["x-xsrf-token"] = xsrf
-            log(f"XSRF-TOKEN 已设置: {xsrf[:30]}...")
+            decoded = unquote(xsrf)
+            self.session.headers["x-xsrf-token"] = decoded
+            log(f"x-xsrf-token 已设置: {decoded[:30]}...")
 
-        # 从 HTML/JS 里找 captcha_token
-        # 常见形式: captcha_token: "xxx" 或 captchaToken = "xxx"
-        patterns = [
-            r'captcha_token["\s]*[:=]["\s]*([A-Za-z0-9_\-]+)',
-            r'captchaToken["\s]*[:=]["\s]*["\']([A-Za-z0-9_\-]+)',
-            r'"captcha_token"\s*:\s*"([A-Za-z0-9_\-]+)"',
-        ]
-        for pat in patterns:
-            m = re.search(pat, r.text)
-            if m:
-                token = m.group(1)
-                log(f"captcha_token: {token[:20]}...")
-                return token
+    def _get_captcha_token(self):
+        """
+        已通过抓包确认的完整流程：
+          1. GET /auth/login    -> 拿 XSRF-TOKEN cookie
+          2. POST /auth/captcha -> 发送伪造鼠标行为数据，返回 {"passed":true,"token":"xxx"}
+          3. 返回 token 作为登录 payload 的 captcha_token 字段
+        """
+        log("GET 登录页，获取 XSRF-TOKEN ...")
+        r = self.session.get(LOGIN_URL, timeout=20)
+        r.raise_for_status()
+        self._set_xsrf()
 
-        # 找不到也没关系，试试不带 captcha_token 发请求
-        log_warn("未找到 captcha_token，将尝试不带 token 登录")
-        return ""
+        captcha_url = f"{BASE_URL}/auth/captcha"
+        fake_behavior = {
+            "mouse_movements": 320,
+            "mouse_distance":  5800,
+            "clicks":          1,
+            "key_presses":     3,
+            "elapsed_ms":      45000,
+        }
+        log(f"POST {captcha_url} ...")
+        cr = self.session.post(captcha_url, json=fake_behavior, timeout=20)
+        log(f"  -> HTTP {cr.status_code}")
+
+        if cr.status_code == 200:
+            data = cr.json()
+            log(f"  -> 响应: {data}")
+            self._set_xsrf()
+            token = data.get("token") or data.get("captcha_token")
+            if token and data.get("passed"):
+                log(f"captcha 通过，token: {str(token)[:20]}...")
+                return str(token)
+            elif token:
+                log_warn("captcha passed=false，仍尝试用 token 登录")
+                return str(token)
+            else:
+                log_warn(f"captcha 响应无 token: {data}")
+                return ""
+        else:
+            log_warn(f"POST /auth/captcha 失败 HTTP {cr.status_code}，不带 token 尝试登录")
+            return ""
+
 
     def login(self, email, password):
         captcha_token = self._get_captcha_token()
@@ -163,10 +185,8 @@ class ACLCloudsAPI:
         )
         log(f"登录响应: HTTP {r.status_code}")
 
-        # 更新 XSRF-TOKEN（登录后服务器会重新下发）
-        xsrf = self.session.cookies.get("XSRF-TOKEN", "")
-        if xsrf:
-            self.session.headers["x-xsrf-token"] = xsrf
+        # 更新 XSRF-TOKEN（登录后服务器会重新下发，需 URL decode）
+        self._set_xsrf()
 
         if r.status_code == 200:
             # 检查是否真的登录成功（有 session cookie 就算成功）
