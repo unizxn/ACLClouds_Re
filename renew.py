@@ -105,22 +105,26 @@ def run():
         try:
             # ── 登录 ─────────────────────────────────────
             log(f"打开登录页: {LOGIN_URL}")
-            page.goto(LOGIN_URL, wait_until="networkidle")
-            page.wait_for_timeout(2000)
+            page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            # 等待邮箱输入框出现，确认页面 JS 已渲染完成
+            page.wait_for_selector('#username, input[name="username"]', timeout=TIMEOUT)
+            page.wait_for_timeout(1000)
 
-            # 填写邮箱
-            page.fill('input[type="email"], input[name="email"], input[placeholder*="mail" i], input[placeholder*="username" i]', EMAIL)
+            # 填写邮箱（实际 HTML: id="username" type="text" name="username"）
+            page.fill('#username, input[name="username"]', EMAIL)
             # 填写密码
-            page.fill('input[type="password"]', PASSWORD)
+            page.fill('input[type="password"], input[name="password"]', PASSWORD)
+            page.wait_for_timeout(500)
 
-            # 处理验证码（hCaptcha / 自定义复选框）
+            # 处理验证码（实际 HTML: div.auth-captcha-checkbox role="checkbox"，不是 input）
             try:
-                checkbox = page.locator('input[type="checkbox"]').first
-                if checkbox.is_visible(timeout=3000):
-                    checkbox.click()
+                captcha = page.locator('div.auth-captcha-checkbox, [role="checkbox"]').first
+                if captcha.is_visible(timeout=5000):
+                    captcha.click()
+                    log("已点击验证码复选框")
                     page.wait_for_timeout(2000)
             except Exception:
-                pass
+                log_warn("未找到验证码复选框，跳过")
 
             # 点击登录
             page.click('button[type="submit"], button:has-text("Sign in")')
@@ -130,7 +134,7 @@ def run():
 
             # ── 打开项目页 ────────────────────────────────
             log(f"打开项目页: {PROJECTS_URL}")
-            page.goto(PROJECTS_URL, wait_until="networkidle")
+            page.goto(PROJECTS_URL, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
             screenshot(page, "projects-page")
 
@@ -209,7 +213,7 @@ def run():
                     screenshot(page, f"renew-{idx}")
 
                     # 读取续期后状态
-                    page.goto(PROJECTS_URL, wait_until="networkidle")
+                    page.goto(PROJECTS_URL, wait_until="domcontentloaded")
                     page.wait_for_timeout(3000)
 
                     # 重新找该卡片
