@@ -30,7 +30,7 @@ TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()   # 如果你的 Secret 是 WXPUSHER_UUID，这里也要改成 WXPUSHER_UUID
 
-RENEW_THRESHOLD_DAYS = 10
+RENEW_THRESHOLD_DAYS = 3
 
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
