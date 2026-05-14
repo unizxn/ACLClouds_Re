@@ -2,12 +2,14 @@
 """
 ACLClouds 自动续期脚本 (纯 API 版)
 支持 Telegram 和 wxpusher 双推送
+续期成功后自动重新获取新的过期时间并打印
 """
 
 import os
 import re
 import sys
 import json
+import time
 import traceback
 from urllib.request import Request, urlopen
 
@@ -26,9 +28,9 @@ PASSWORD     = os.environ.get("ACLCLOUDS_PASSWORD", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "").strip()
 
-# wxpusher (注意：变量名与你的 Secret 保持一致)
+# wxpusher (注意：变量名与你的 Secret 一致)
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
-WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()   # 如果你的 Secret 是 WXPUSHER_UUID，这里也要改成 WXPUSHER_UUID
+WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
 RENEW_THRESHOLD_DAYS = 3
 
@@ -226,15 +228,31 @@ class ACLCloudsAPI:
         return projects
 
     def renew_project(self, project):
+        """
+        续期单个项目，成功后返回新的 expires_at 字符串
+        """
         identifier = project.get("identifier")
         if not identifier:
             raise ValueError(f"无法获取 identifier，字段: {list(project.keys())}")
+
         url = f"{API_BASE}/client/servers/{identifier}/upgrade/renew"
         log(f"POST {url}")
         r = self.session.post(url, timeout=20)
         log(f"  → HTTP {r.status_code}")
+
         if r.status_code == 200:
-            return True
+            log("  续期请求成功，重新获取项目信息...")
+            time.sleep(2)  # 等待服务器处理
+            # 重新获取项目列表
+            new_data = self.session.get(f"{BASE_URL}/api/client").json()
+            for item in new_data.get("data", []):
+                attrs = item.get("attributes", {})
+                if attrs.get("identifier") == identifier:
+                    new_expires = attrs.get("expires_at")
+                    log(f"  新的过期时间: {new_expires}")
+                    return new_expires
+            log_warn("  未能获取到新的过期时间")
+            return None
         else:
             try:
                 err = r.json()
@@ -283,8 +301,11 @@ def run():
 
         log(f"[{name}] 开始续期...")
         try:
-            api.renew_project(project)
+            new_expires = api.renew_project(project)
             log(f"[{name}] ✅ 续期成功")
+            if new_expires:
+                new_remaining = parse_expires(new_expires)
+                log(f"[{name}] 续期后剩余天数: {new_remaining:.2f} 天（新过期时间: {new_expires}）")
             renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天）")
         except Exception as e:
             log_error(f"[{name}] 续期失败: {e}")
