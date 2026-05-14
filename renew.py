@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-ACLClouds 自动续期脚本 (纯 API 版，无浏览器，无 captcha 障碍)
+ACLClouds 自动续期脚本 (纯 API 版)
 登录流程：
-  1. GET /auth/login  → 从 HTML 里提取 captcha_token
+  1. GET /auth/login  → 从 HTML 里提取 captcha_token (已通过 /auth/captcha 模拟绕过)
   2. POST /auth/login → { user, password, captcha_answer: "human", captcha_token }
   3. 拿到 session cookie，后续请求全带上
+
+项目列表 API: GET /api/client
+续期 API: 需要手动抓包确定（脚本内置了几个常见候选）
 """
 
 import os
@@ -58,7 +61,7 @@ def send_tg(text: str):
         body = json.dumps({
             "chat_id": TG_CHAT_ID,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
         }).encode()
         req = Request(
             f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
@@ -125,10 +128,7 @@ class ACLCloudsAPI:
 
     def _get_captcha_token(self):
         """
-        已通过抓包确认的完整流程：
-          1. GET /auth/login    -> 拿 XSRF-TOKEN cookie
-          2. POST /auth/captcha -> 发送伪造鼠标行为数据，返回 {"passed":true,"token":"xxx"}
-          3. 返回 token 作为登录 payload 的 captcha_token 字段
+        通过模拟鼠标行为绕过验证码
         """
         log("GET 登录页，获取 XSRF-TOKEN ...")
         r = self.session.get(LOGIN_URL, timeout=20)
@@ -165,7 +165,6 @@ class ACLCloudsAPI:
             log_warn(f"POST /auth/captcha 失败 HTTP {cr.status_code}，不带 token 尝试登录")
             return ""
 
-
     def login(self, email, password):
         captcha_token = self._get_captcha_token()
 
@@ -185,15 +184,13 @@ class ACLCloudsAPI:
         )
         log(f"登录响应: HTTP {r.status_code}")
 
-        # 更新 XSRF-TOKEN（登录后服务器会重新下发，需 URL decode）
+        # 更新 XSRF-TOKEN
         self._set_xsrf()
 
         if r.status_code == 200:
-            # 检查是否真的登录成功（有 session cookie 就算成功）
             if self.session.cookies.get("aclclouds_session"):
                 log("登录成功 ✅（aclclouds_session 已设置）")
                 return True
-            # 也可能返回 JSON 带 token
             try:
                 data = r.json()
                 log(f"响应 JSON keys: {list(data.keys())}")
@@ -202,84 +199,71 @@ class ACLCloudsAPI:
                     self.session.headers["Authorization"] = f"Bearer {tok}"
                     log("登录成功 ✅（Bearer token）")
                     return True
-                # 有时候 200 就代表成功，没有额外字段
                 if r.cookies or self.session.cookies:
                     log("登录成功 ✅（Cookie 模式）")
                     return True
             except Exception:
                 pass
 
-        try:
-            log_error(f"登录失败，响应: {r.text[:300]}")
-        except Exception:
-            pass
+        log_error(f"登录失败，响应: {r.text[:300]}")
         raise RuntimeError(f"登录失败，HTTP {r.status_code}")
 
     def get_projects(self):
-        """获取项目列表"""
-        candidates = [
-            f"{API_BASE}/projects",
-            f"{API_BASE}/servers",
-            f"{API_BASE}/services",
-            f"{API_BASE}/instances",
-            f"{BASE_URL}/projects",
-        ]
-        for ep in candidates:
-            try:
-                log(f"GET {ep}")
-                r = self.session.get(ep, timeout=20)
-                log(f"  → HTTP {r.status_code}")
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list) and data:
-                        log(f"  → {len(data)} 个项目")
-                        return data
-                    if isinstance(data, dict):
-                        for key in ("data", "projects", "servers", "items", "results"):
-                            if isinstance(data.get(key), list):
-                                log(f"  → {len(data[key])} 个项目 (key={key})")
-                                return data[key]
-            except Exception as e:
-                log_warn(f"  → 异常: {e}")
-
-        raise RuntimeError(
-            "无法获取项目列表。\n"
-            "请用 F12 → Network 找项目列表的 API 请求，截图告诉我 URL。"
-        )
+        """获取项目列表 - 使用 /api/client"""
+        url = f"{BASE_URL}/api/client"
+        log(f"GET {url}")
+        r = self.session.get(url, timeout=20)
+        log(f"  → HTTP {r.status_code}")
+        if r.status_code != 200:
+            raise RuntimeError(f"获取项目列表失败 HTTP {r.status_code}")
+        data = r.json()
+        # 响应结构: {"object":"list", "data":[{"object":"server","attributes":{...}}]}
+        if not isinstance(data, dict) or "data" not in data:
+            raise RuntimeError(f"意外的响应结构: {data}")
+        projects = []
+        for item in data["data"]:
+            attrs = item.get("attributes")
+            if attrs:
+                projects.append(attrs)
+        log(f"  → 找到 {len(projects)} 个项目")
+        return projects
 
     def renew_project(self, project):
-        """续期单个项目"""
+        """续期单个项目 - 内置常见续期端点候选"""
+        # 可能的ID字段
         pid = (
-            project.get("id") or project.get("_id") or
-            project.get("uuid") or project.get("server_id")
+            project.get("identifier") or
+            project.get("internal_id") or
+            project.get("id") or
+            project.get("uuid")
         )
         if not pid:
             raise ValueError(f"无法获取项目 ID，字段: {list(project.keys())}")
 
+        # 候选续期端点（按常见模式，需要根据实际抓包调整）
         candidates = [
-            (f"{API_BASE}/projects/{pid}/renew",  "POST"),
-            (f"{API_BASE}/servers/{pid}/renew",   "POST"),
-            (f"{API_BASE}/projects/{pid}/extend", "POST"),
-            (f"{API_BASE}/servers/{pid}/extend",  "POST"),
-            (f"{API_BASE}/instances/{pid}/renew", "POST"),
-            (f"{API_BASE}/renew",                 "POST"),  # body 带 id
+            (f"{API_BASE}/servers/{pid}/renew", "POST"),
+            (f"{API_BASE}/client/{pid}/renew", "POST"),
+            (f"{API_BASE}/projects/{pid}/renew", "POST"),
+            (f"{API_BASE}/renew", "POST"),  # body: {"server_id": pid}
         ]
         for ep, method in candidates:
             try:
-                body = {} if "renew" not in ep or pid in ep else {"id": pid}
-                log(f"  {method} {ep}")
+                body = {}
+                if ep.endswith("/renew") and pid not in ep:
+                    body = {"server_id": pid}  # 常见传参方式
+                log(f"  尝试 {method} {ep}")
                 fn = self.session.post if method == "POST" else self.session.put
                 r = fn(ep, json=body, timeout=20)
-                log(f"  → HTTP {r.status_code}")
+                log(f"    → HTTP {r.status_code}")
                 if r.status_code in (200, 201, 204):
                     return True
-                if r.status_code in (404, 405):
+                if r.status_code == 404:
                     continue
             except Exception as e:
-                log_warn(f"  → 异常: {e}")
+                log_warn(f"    → 异常: {e}")
 
-        raise RuntimeError(f"项目 {pid} 所有续期端点均失败")
-
+        raise RuntimeError(f"项目 {pid} 所有续期端点均失败，请手动抓包续期接口")
 
 # ── 主流程 ────────────────────────────────────────────────
 def run():
@@ -360,7 +344,6 @@ def run():
         send_tg("\n".join(lines))
     else:
         log("无续期操作，不发送 TG 推送")
-
 
 if __name__ == "__main__":
     try:
