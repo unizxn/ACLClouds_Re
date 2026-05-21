@@ -32,7 +32,7 @@ TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
-RENEW_THRESHOLD_DAYS = 3
+RENEW_THRESHOLD_DAYS = 2
 
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
