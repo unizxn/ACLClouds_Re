@@ -268,7 +268,16 @@ def run():
         raise RuntimeError("缺少环境变量 ACLCLOUDS_EMAIL 或 ACLCLOUDS_PASSWORD")
 
     api = ACLCloudsAPI()
-    api.login(EMAIL, PASSWORD)
+    for _attempt in range(3):
+        try:
+            api.login(EMAIL, PASSWORD)
+            break
+        except Exception as e:
+            if _attempt < 2:
+                log_warn(f"登录失败，第 {_attempt + 1} 次重试... ({e})")
+                import time; time.sleep(5)
+            else:
+                raise
 
     projects = api.get_projects()
     if not projects:
