@@ -42,9 +42,14 @@ HEADERS = {
                   "Chrome/148.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
-    "Origin": BASE_URL,
     "Referer": f"{BASE_URL}/projects",
+}
+
+# 登录/captcha 请求额外携带的头，模拟浏览器同域提交
+LOGIN_EXTRA_HEADERS = {
+    "Origin": BASE_URL,
     "x-requested-with": "XMLHttpRequest",
+    "Content-Type": "application/json",
 }
 
 # ── 日志 ─────────────────────────────────────────────────
@@ -201,7 +206,7 @@ class ACLCloudsAPI:
             "elapsed_ms":      45000,
         }
         log(f"POST {captcha_url} ...")
-        cr = self.session.post(captcha_url, json=fake_behavior, timeout=60)
+        cr = self.session.post(captcha_url, json=fake_behavior, timeout=60, headers=LOGIN_EXTRA_HEADERS)
         log(f"  -> HTTP {cr.status_code}")
         if cr.status_code == 200:
             data = cr.json()
@@ -230,7 +235,7 @@ class ACLCloudsAPI:
             "captcha_token":  captcha_token,
         }
         log(f"POST {LOGIN_URL}")
-        r = self.session.post(LOGIN_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
+        r = self.session.post(LOGIN_URL, json=payload, headers=LOGIN_EXTRA_HEADERS, timeout=60)
         log(f"登录响应: HTTP {r.status_code}")
         log(f"登录响应头: {dict(r.headers)}")
         log(f"登录响应 Set-Cookie: {r.headers.get('Set-Cookie', '无')}")
