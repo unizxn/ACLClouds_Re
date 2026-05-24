@@ -12,7 +12,7 @@ jobs:
     permissions:
       actions: write
       contents: read
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: 拉取仓库
@@ -44,10 +44,18 @@ jobs:
           curl -s --max-time 5 --socks5 127.0.0.1:10808 ifconfig.me
           echo ""
 
-      - name: 运行续期脚本
+      - name: 运行续期脚本（多账号）
         env:
-          ACLCLOUDS_EMAIL:    ${{ secrets.ACLCLOUDS_EMAIL }}
-          ACLCLOUDS_PASSWORD: ${{ secrets.ACLCLOUDS_PASSWORD }}
+          # ── 账号1（必填） ──────────────────────────────
+          ACCOUNT1_EMAIL:    ${{ secrets.ACCOUNT1_EMAIL }}
+          ACCOUNT1_PASSWORD: ${{ secrets.ACCOUNT1_PASSWORD }}
+          # ── 账号2（选填，留空则跳过） ──────────────────
+          ACCOUNT2_EMAIL:    ${{ secrets.ACCOUNT2_EMAIL }}
+          ACCOUNT2_PASSWORD: ${{ secrets.ACCOUNT2_PASSWORD }}
+          # ── 账号3（选填，留空则跳过） ──────────────────
+          ACCOUNT3_EMAIL:    ${{ secrets.ACCOUNT3_EMAIL }}
+          ACCOUNT3_PASSWORD: ${{ secrets.ACCOUNT3_PASSWORD }}
+          # ── 推送配置（全局共用） ───────────────────────
           TG_BOT_TOKEN:       ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:         ${{ secrets.TG_CHAT_ID }}
           WXPUSHER_APPTOKEN:  ${{ secrets.WXPUSHER_APPTOKEN }}
