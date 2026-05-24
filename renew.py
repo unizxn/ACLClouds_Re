@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-ACLClouds 自动续期脚本 (纯 API 版)
-支持 Telegram 和 wxpusher 双推送
-续期成功后自动重新获取新的过期时间并打印
+ACLClouds 自动续期脚本 (Playwright 全程浏览器版)
+用真实浏览器操作，完全绕开 requests session 问题
 """
 
 import os
@@ -13,44 +12,17 @@ import time
 import traceback
 from urllib.request import Request, urlopen
 
-try:
-    import requests
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q"])
-    import requests
-
 # ── 环境变量 ─────────────────────────────────────────────
-EMAIL        = os.environ.get("ACLCLOUDS_EMAIL", "").strip()
-PASSWORD     = os.environ.get("ACLCLOUDS_PASSWORD", "").strip()
-
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "").strip()
-
+EMAIL             = os.environ.get("ACLCLOUDS_EMAIL", "").strip()
+PASSWORD          = os.environ.get("ACLCLOUDS_PASSWORD", "").strip()
+TG_BOT_TOKEN      = os.environ.get("TG_BOT_TOKEN", "").strip()
+TG_CHAT_ID        = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
 RENEW_THRESHOLD_DAYS = 2
-
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
-API_BASE  = f"{BASE_URL}/api"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/148.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": f"{BASE_URL}/projects",
-}
-
-# 登录/captcha 请求额外携带的头，模拟浏览器同域提交
-LOGIN_EXTRA_HEADERS = {
-    "Origin": BASE_URL,
-    "x-requested-with": "XMLHttpRequest",
-    "Content-Type": "application/json",
-}
 
 # ── 日志 ─────────────────────────────────────────────────
 def log(msg):       print(f"[INFO] {msg}", flush=True)
@@ -59,46 +31,13 @@ def log_error(msg): print(f"[ERROR] {msg}", flush=True)
 
 def get_outbound_ip():
     try:
-        import urllib.request as _ur
-        data = _ur.urlopen("https://cloudflare.com/cdn-cgi/trace", timeout=5).read().decode()
+        data = urlopen("https://cloudflare.com/cdn-cgi/trace", timeout=5).read().decode()
         for line in data.splitlines():
             if line.startswith("ip="):
                 return line.strip()
-        return "ip=未知"
     except Exception as e:
         return f"ip=获取失败({e})"
-
-def mask_cookies(cookies: dict) -> dict:
-    return {k: v[:6] + "***" for k, v in cookies.items()}
-
-# ── 截图 ─────────────────────────────────────────────────
-def take_screenshot(cookies: dict, label: str = "projects"):
-    try:
-        from playwright.sync_api import sync_playwright
-        os.makedirs("screenshots", exist_ok=True)
-        with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"])
-            ctx = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent=HEADERS["User-Agent"],
-            )
-            for name, value in cookies.items():
-                try:
-                    ctx.add_cookies([{
-                        "name": name, "value": value,
-                        "domain": "dash.aclclouds.com", "path": "/",
-                    }])
-                except Exception:
-                    pass
-            page = ctx.new_page()
-            page.goto(f"{BASE_URL}/projects", timeout=30000)
-            page.wait_for_timeout(3000)
-            path = f"screenshots/{label}.png"
-            page.screenshot(path=path, full_page=True)
-            log(f"截图已保存: {path}")
-            browser.close()
-    except Exception as e:
-        log_warn(f"截图失败（不影响续期）: {e}")
+    return "ip=未知"
 
 # ── 推送函数 ──────────────────────────────────────────────
 def send_tg(text: str):
@@ -106,16 +45,9 @@ def send_tg(text: str):
         log_warn("TG 未配置，跳过推送")
         return
     try:
-        body = json.dumps({
-            "chat_id": TG_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-        }).encode()
-        req = Request(
-            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-            data=body,
-            headers={"Content-Type": "application/json"},
-        )
+        body = json.dumps({"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}).encode()
+        req = Request(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                      data=body, headers={"Content-Type": "application/json"})
         urlopen(req, timeout=15)
         log("TG 推送成功")
     except Exception as e:
@@ -126,17 +58,11 @@ def send_wxpusher(text: str):
         log_warn("wxpusher 未配置，跳过推送")
         return
     try:
-        url = "https://wxpusher.zjiecode.com/api/send/message"
-        payload = {
-            "appToken": WXPUSHER_APPTOKEN,
-            "content": text,
-            "summary": "ACLClouds 续期通知",
-            "contentType": 1,
-            "uids": [WXPUSHER_UID],
-        }
-        req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        resp = urlopen(req, timeout=15)
-        result = json.loads(resp.read().decode())
+        payload = {"appToken": WXPUSHER_APPTOKEN, "content": text,
+                   "summary": "ACLClouds 续期通知", "contentType": 1, "uids": [WXPUSHER_UID]}
+        req = Request("https://wxpusher.zjiecode.com/api/send/message",
+                      data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        result = json.loads(urlopen(req, timeout=15).read().decode())
         if result.get("code") == 1000:
             log("wxpusher 推送成功")
         else:
@@ -175,235 +101,190 @@ def parse_expires(text):
     total = days + hours / 24 + minutes / 1440
     return total if total > 0 else None
 
-# ── API 封装 ──────────────────────────────────────────────
-class ACLCloudsAPI:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+# ── Playwright 核心 ───────────────────────────────────────
+def run_with_browser():
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    def _set_xsrf(self):
-        from urllib.parse import unquote
-        xsrf = self.session.cookies.get("XSRF-TOKEN", "")
-        if xsrf:
-            decoded = unquote(xsrf)
-            self.session.headers["x-xsrf-token"] = decoded
-            log(f"x-xsrf-token 已设置: {decoded[:6]}***（已脱敏）")
+    log(f"[网络] 出口 IP: {get_outbound_ip()}")
 
-    def _get_captcha_token(self):
-        log(f"[网络] 出口 IP: {get_outbound_ip()}")
-        log("GET 登录页，获取 XSRF-TOKEN ...")
-        r = self.session.get(LOGIN_URL, timeout=60)
-        r.raise_for_status()
-        self._set_xsrf()
-        log(f"登录页 cookie: {mask_cookies(dict(self.session.cookies))}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"])
+        ctx = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/148.0.0.0 Safari/537.36",
+            locale="zh-CN",
+        )
+        page = ctx.new_page()
 
-        captcha_url = f"{BASE_URL}/auth/captcha"
-        fake_behavior = {
-            "mouse_movements": 320,
-            "mouse_distance":  5800,
-            "clicks":          1,
-            "key_presses":     3,
-            "elapsed_ms":      45000,
-        }
-        log(f"POST {captcha_url} ...")
-        cr = self.session.post(captcha_url, json=fake_behavior, timeout=60, headers=LOGIN_EXTRA_HEADERS)
-        log(f"  -> HTTP {cr.status_code}")
-        if cr.status_code == 200:
-            data = cr.json()
-            log(f"  -> 响应: {{'passed': {data.get('passed')}, 'token': '{str(data.get('token', ''))[:4]}***（已脱敏）'}}")
-            self._set_xsrf()
-            token = data.get("token") or data.get("captcha_token")
-            if token and data.get("passed"):
-                log(f"captcha 通过，token: {str(token)[:4]}***（已脱敏）")
-                return str(token)
-            elif token:
-                log_warn("captcha passed=false，仍尝试用 token 登录")
-                return str(token)
-            else:
-                log_warn(f"captcha 响应无 token: {data}")
-                return ""
-        else:
-            log_warn(f"POST /auth/captcha 失败 HTTP {cr.status_code}，body: {cr.text[:200]}")
-            return ""
+        # ── 1. 登录 ──────────────────────────────────────
+        log(f"导航到登录页: {LOGIN_URL}")
+        page.goto(LOGIN_URL, timeout=60000)
+        page.wait_for_load_state("networkidle", timeout=30000)
 
-    def login(self, email, password):
-        captcha_token = self._get_captcha_token()
-        payload = {
-            "user":           email,
-            "password":       password,
-            "captcha_answer": "human",
-            "captcha_token":  captcha_token,
-        }
-        log(f"POST {LOGIN_URL}")
-        r = self.session.post(LOGIN_URL, json=payload, headers=LOGIN_EXTRA_HEADERS, timeout=60)
-        log(f"登录响应: HTTP {r.status_code}")
-        log(f"登录响应头: {dict(r.headers)}")
-        log(f"登录响应 Set-Cookie: {r.headers.get('Set-Cookie', '无')}")
-        self._set_xsrf()
+        log("填写登录表单...")
+        # 等待邮箱输入框
+        page.wait_for_selector("input[type='email'], input[name='user'], input[placeholder*='mail']", timeout=15000)
+        page.fill("input[type='email'], input[name='user'], input[placeholder*='mail']", EMAIL)
+        page.fill("input[type='password']", PASSWORD)
 
-        if r.status_code == 200:
-            log(f"登录后 session cookie: {mask_cookies(dict(self.session.cookies))}")
-            if self.session.cookies.get("aclclouds_session"):
-                log("登录成功 ✅（aclclouds_session 已设置）")
-                return True
-            try:
-                data = r.json()
-                log(f"登录响应体: {str(data)[:200]}")
-                if data.get("token") or data.get("access_token"):
-                    tok = data.get("token") or data.get("access_token")
-                    self.session.headers["Authorization"] = f"Bearer {tok}"
-                    log("登录成功 ✅（Bearer token）")
-                    return True
-                if r.cookies or self.session.cookies:
-                    log("登录成功 ✅（Cookie 模式）")
-                    return True
-            except Exception:
-                pass
-        log_error(f"登录失败，响应体: {r.text[:300]}")
-        raise RuntimeError(f"登录失败，HTTP {r.status_code}")
+        log("提交登录...")
+        page.click("button[type='submit'], button:has-text('Login'), button:has-text('登录')")
+        page.wait_for_load_state("networkidle", timeout=30000)
 
-    def get_projects(self):
-        url = f"{BASE_URL}/api/client"
-        log(f"[网络] 出口 IP: {get_outbound_ip()}")
-        log(f"GET {url}")
-        log(f"  → 请求 cookie: {mask_cookies(dict(self.session.cookies))}")
-        log(f"  → 请求头 x-xsrf-token: {self.session.headers.get('x-xsrf-token', '未设置')[:10]}***")
-        r = self.session.get(url, timeout=60)
-        log(f"  → HTTP {r.status_code}")
-        if r.status_code != 200:
-            log_warn(f"  → 响应体: {r.text[:500]}")
-            log_warn(f"  → 响应头: {dict(r.headers)}")
-            raise RuntimeError(f"获取项目列表失败 HTTP {r.status_code}")
-        data = r.json()
-        if not isinstance(data, dict) or "data" not in data:
-            raise RuntimeError(f"意外的响应结构: {data}")
-        projects = []
-        for item in data["data"]:
-            attrs = item.get("attributes")
-            if attrs:
-                projects.append(attrs)
+        # 等待跳转到 dashboard
+        try:
+            page.wait_for_url(f"{BASE_URL}/projects**", timeout=20000)
+            log("登录成功 ✅，已跳转到项目页")
+        except PWTimeout:
+            # 可能已经在 projects 页或其他页
+            current = page.url
+            log_warn(f"等待跳转超时，当前 URL: {current}")
+            if "login" in current:
+                # 截图留证
+                os.makedirs("screenshots", exist_ok=True)
+                page.screenshot(path="screenshots/login_failed.png", full_page=True)
+                raise RuntimeError("登录失败，仍在登录页")
+
+        # ── 2. 截图（登录后） ─────────────────────────────
+        os.makedirs("screenshots", exist_ok=True)
+        page.screenshot(path="screenshots/after_login.png", full_page=True)
+        log("截图已保存: screenshots/after_login.png")
+
+        # ── 3. 调用 API 获取项目列表 ─────────────────────
+        log("通过浏览器 fetch 获取项目列表...")
+        result = page.evaluate("""async () => {
+            const r = await fetch('/api/client', {
+                headers: {'Accept': 'application/json'}
+            });
+            return {status: r.status, body: await r.text()};
+        }""")
+        log(f"  → HTTP {result['status']}")
+        if result['status'] != 200:
+            log_warn(f"  → 响应体: {result['body'][:300]}")
+            raise RuntimeError(f"获取项目列表失败 HTTP {result['status']}")
+
+        data = json.loads(result['body'])
+        projects = [item['attributes'] for item in data.get('data', []) if item.get('attributes')]
         log(f"  → 找到 {len(projects)} 个项目")
-        return projects
 
-    def renew_project(self, project):
-        identifier = project.get("identifier")
-        if not identifier:
-            raise ValueError(f"无法获取 identifier，字段: {list(project.keys())}")
+        if not projects:
+            log_warn("项目列表为空，无需操作")
+            browser.close()
+            return
 
-        url = f"{API_BASE}/client/servers/{identifier}/upgrade/renew"
-        log(f"POST {url}")
-        log(f"  → 请求 cookie: {mask_cookies(dict(self.session.cookies))}")
-        r = self.session.post(url, timeout=60)
-        log(f"  → HTTP {r.status_code}")
-        log(f"  → 响应体: {r.text[:300]}")
+        # ── 4. 逐项目检查并续期 ──────────────────────────
+        renewed_list = []
+        skipped_list = []
+        failed_list  = []
 
-        if r.status_code == 200:
-            log("  续期请求成功，等待2秒后重新获取项目信息...")
-            time.sleep(2)
-            new_data = self.session.get(f"{BASE_URL}/api/client").json()
-            for item in new_data.get("data", []):
-                attrs = item.get("attributes", {})
-                if attrs.get("identifier") == identifier:
-                    new_expires = attrs.get("expires_at")
-                    log(f"  新的过期时间: {new_expires}")
-                    return new_expires
-            log_warn("  未能获取到新的过期时间")
-            return None
-        else:
+        for project in projects:
+            name       = project.get("name", "未知项目")
+            identifier = project.get("identifier", "")
+            raw_expires = project.get("expires_at")
+            log(f"[{name}] 过期数据: {raw_expires!r}")
+            remaining = parse_expires(raw_expires)
+
+            if remaining is None:
+                log_warn(f"[{name}] 无法解析剩余时间")
+                failed_list.append(f"{name}（无法解析过期时间）")
+                continue
+
+            log(f"[{name}] 剩余 {remaining:.2f} 天")
+
+            if remaining >= RENEW_THRESHOLD_DAYS:
+                log(f"[{name}] 无需续期")
+                skipped_list.append(f"{name}（剩余 {remaining:.1f} 天）")
+                continue
+
+            log(f"[{name}] 开始续期...")
             try:
-                err = r.json()
-                log_warn(f"续期失败: {err}")
-                raise RuntimeError(f"续期失败: {err.get('error', 'unknown')}")
-            except (json.JSONDecodeError, KeyError):
-                log_warn(f"续期失败，HTTP {r.status_code}, body: {r.text[:200]}")
-                raise RuntimeError(f"续期失败，HTTP {r.status_code}")
+                renew_url = f"/api/client/servers/{identifier}/upgrade/renew"
+                renew_result = page.evaluate(f"""async () => {{
+                    const r = await fetch('{renew_url}', {{
+                        method: 'POST',
+                        headers: {{
+                            'Accept': 'application/json',
+                            'X-XSRF-TOKEN': decodeURIComponent(
+                                document.cookie.split('; ')
+                                .find(c => c.startsWith('XSRF-TOKEN='))
+                                ?.split('=')[1] || ''
+                            )
+                        }}
+                    }});
+                    return {{status: r.status, body: await r.text()}};
+                }}""")
+                log(f"  → 续期 HTTP {renew_result['status']}, body: {renew_result['body'][:200]}")
 
-# ── 主流程 ────────────────────────────────────────────────
-def run():
-    if not EMAIL or not PASSWORD:
-        raise RuntimeError("缺少环境变量 ACLCLOUDS_EMAIL 或 ACLCLOUDS_PASSWORD")
+                if renew_result['status'] == 200:
+                    log(f"[{name}] ✅ 续期成功，等待2秒后获取新到期时间...")
+                    time.sleep(2)
+                    new_result = page.evaluate("""async () => {
+                        const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
+                        return await r.json();
+                    }""")
+                    new_expires = None
+                    for item in new_result.get('data', []):
+                        attrs = item.get('attributes', {})
+                        if attrs.get('identifier') == identifier:
+                            new_expires = attrs.get('expires_at')
+                            break
+                    if new_expires:
+                        new_remaining = parse_expires(new_expires)
+                        log(f"[{name}] 续期后剩余 {new_remaining:.2f} 天（新到期: {new_expires}）")
+                        renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天，续期后剩余 {new_remaining:.1f} 天）")
+                    else:
+                        renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天）")
+                else:
+                    body = renew_result['body']
+                    try:
+                        err = json.loads(body).get('error', 'unknown')
+                    except Exception:
+                        err = body[:80]
+                    raise RuntimeError(f"续期失败: {err}")
 
-    api = ACLCloudsAPI()
-    for _attempt in range(3):
-        try:
-            api.login(EMAIL, PASSWORD)
-            break
-        except Exception as e:
-            if _attempt < 2:
-                log_warn(f"登录失败，第 {_attempt + 1} 次重试... ({e})")
-                time.sleep(5)
-            else:
-                raise
+            except Exception as e:
+                log_error(f"[{name}] 续期异常: {e}")
+                failed_list.append(f"{name}（{str(e)[:80]}）")
 
-    projects = api.get_projects()
-    if not projects:
-        log_warn("项目列表为空，无需操作")
-        return
+        # ── 5. 截图（操作后） ─────────────────────────────
+        page.screenshot(path="screenshots/after_renew.png", full_page=True)
+        log("截图已保存: screenshots/after_renew.png")
 
-    log(f"共 {len(projects)} 个项目")
+        browser.close()
 
-    take_screenshot(dict(api.session.cookies), label="before_renew")
+        # ── 6. 汇总推送 ──────────────────────────────────
+        log("=" * 50)
+        log(f"续期成功: {len(renewed_list)} 个")
+        log(f"无需续期: {len(skipped_list)} 个")
+        log(f"失败/异常: {len(failed_list)} 个")
 
-    renewed_list = []
-    skipped_list = []
-    failed_list  = []
+        if renewed_list:
+            lines = ["✅ <b>ACLClouds 自动续期成功</b>", ""]
+            lines += [f"• {i}" for i in renewed_list]
+            if failed_list:
+                lines += ["", "⚠️ 以下项目失败："] + [f"• {i}" for i in failed_list]
+            lines += ["", "ACLClouds Auto Renew"]
+            send_all_push("\n".join(lines))
+        elif failed_list:
+            lines = ["❌ <b>ACLClouds 续期失败</b>", ""]
+            lines += [f"• {i}" for i in failed_list]
+            lines += ["", "ACLClouds Auto Renew"]
+            send_all_push("\n".join(lines))
+        else:
+            log("无续期操作，不发送推送")
 
-    for project in projects:
-        name = project.get("name", "未知项目")
-        raw_expires = project.get("expires_at")
-        log(f"[{name}] 过期数据: {raw_expires!r}")
-        remaining = parse_expires(raw_expires)
 
-        if remaining is None:
-            log_warn(f"[{name}] 无法解析剩余时间")
-            failed_list.append(f"{name}（无法解析过期时间）")
-            continue
-
-        log(f"[{name}] 剩余 {remaining:.2f} 天")
-
-        if remaining >= RENEW_THRESHOLD_DAYS:
-            log(f"[{name}] 无需续期")
-            skipped_list.append(f"{name}（剩余 {remaining:.1f} 天）")
-            continue
-
-        log(f"[{name}] 开始续期...")
-        try:
-            new_expires = api.renew_project(project)
-            log(f"[{name}] ✅ 续期成功")
-            if new_expires:
-                new_remaining = parse_expires(new_expires)
-                log(f"[{name}] 续期后剩余天数: {new_remaining:.2f} 天（新过期时间: {new_expires}）")
-                renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天，续期后剩余 {new_remaining:.1f} 天）")
-            else:
-                renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天）")
-        except Exception as e:
-            log_error(f"[{name}] 续期失败: {e}")
-            failed_list.append(f"{name}（{str(e)[:80]}）")
-
-    log("=" * 50)
-    log(f"续期成功: {len(renewed_list)} 个")
-    log(f"无需续期: {len(skipped_list)} 个")
-    log(f"失败/异常: {len(failed_list)} 个")
-
-    if renewed_list:
-        lines = ["✅ <b>ACLClouds 自动续期成功</b>", ""]
-        lines += [f"• {i}" for i in renewed_list]
-        if failed_list:
-            lines += ["", "⚠️ 以下项目失败："] + [f"• {i}" for i in failed_list]
-        lines += ["", "ACLClouds Auto Renew"]
-        send_all_push("\n".join(lines))
-    elif failed_list:
-        lines = ["❌ <b>ACLClouds 续期失败</b>", ""]
-        lines += [f"• {i}" for i in failed_list]
-        lines += ["", "ACLClouds Auto Renew"]
-        send_all_push("\n".join(lines))
-    else:
-        log("无续期操作，不发送推送")
-
+# ── 主入口 ────────────────────────────────────────────────
 if __name__ == "__main__":
+    if not EMAIL or not PASSWORD:
+        log_error("缺少环境变量 ACLCLOUDS_EMAIL 或 ACLCLOUDS_PASSWORD")
+        sys.exit(1)
     try:
-        run()
+        run_with_browser()
         log("脚本执行完毕")
     except Exception:
         log_error("脚本失败")
         traceback.print_exc()
+        sys.exit(1)
