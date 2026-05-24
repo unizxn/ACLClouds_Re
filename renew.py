@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-ACLClouds 自动续期脚本 (Playwright 全程浏览器版)
+ACLClouds 自动续期脚本 (Playwright 全程浏览器版 · 多账号)
+支持最多 3 个账号，通过编号 Secret 区分：
+  ACCOUNT1_EMAIL / ACCOUNT1_PASSWORD
+  ACCOUNT2_EMAIL / ACCOUNT2_PASSWORD
+  ACCOUNT3_EMAIL / ACCOUNT3_PASSWORD（可选）
 """
 
 import os
@@ -11,21 +15,29 @@ import time
 import traceback
 from urllib.request import Request, urlopen
 
-# ── 环境变量 ─────────────────────────────────────────────
-EMAIL             = os.environ.get("ACLCLOUDS_EMAIL", "").strip()
-PASSWORD          = os.environ.get("ACLCLOUDS_PASSWORD", "").strip()
+# ── 代理配置 ──────────────────────────────────────────────
+# v2ray/Xray 本地 SOCKS5 代理
+PROXY_SERVER = "socks5://127.0.0.1:10808"
+
+# ── 推送凭据（全局共用） ──────────────────────────────────
 TG_BOT_TOKEN      = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID        = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
-# ── 代理配置 ──────────────────────────────────────────────
-# v2ray/Xray 本地 SOCKS5 代理（与 workflow 中 Xray 启动的端口一致）
-PROXY_SERVER = "socks5://127.0.0.1:10808"
-
 RENEW_THRESHOLD_DAYS = 2
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
+
+# ── 读取多账号列表 ────────────────────────────────────────
+def load_accounts():
+    accounts = []
+    for i in range(1, 4):           # 支持 1~3 个账号
+        email    = os.environ.get(f"ACCOUNT{i}_EMAIL", "").strip()
+        password = os.environ.get(f"ACCOUNT{i}_PASSWORD", "").strip()
+        if email and password:
+            accounts.append({"index": i, "email": email, "password": password})
+    return accounts
 
 # ── 日志 ─────────────────────────────────────────────────
 def log(msg):       print(f"[INFO] {msg}", flush=True)
@@ -43,7 +55,6 @@ def get_outbound_ip():
     return "ip=未知"
 
 def get_proxy_ip():
-    """通过 SOCKS5 代理获取出口 IP"""
     try:
         import subprocess
         result = subprocess.run(
@@ -57,7 +68,6 @@ def get_proxy_ip():
 # ── 推送函数 ──────────────────────────────────────────────
 def send_tg(text: str):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        log_warn("TG 未配置，跳过推送")
         return
     try:
         body = json.dumps({"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}).encode()
@@ -70,7 +80,6 @@ def send_tg(text: str):
 
 def send_wxpusher(text: str):
     if not WXPUSHER_APPTOKEN or not WXPUSHER_UID:
-        log_warn("wxpusher 未配置，跳过推送")
         return
     try:
         payload = {"appToken": WXPUSHER_APPTOKEN, "content": text,
@@ -88,10 +97,6 @@ def send_wxpusher(text: str):
 def send_all_push(text: str):
     send_tg(text)
     send_wxpusher(text)
-
-def send_error_push(msg: str):
-    lines = ["❌ <b>ACLClouds 续期脚本异常</b>", "", msg, "", "ACLClouds Auto Renew"]
-    send_all_push("\n".join(lines))
 
 # ── 解析剩余时间 ──────────────────────────────────────────
 def parse_expires(text):
@@ -130,15 +135,23 @@ def screenshot(page, name: str):
     except Exception as e:
         log_warn(f"截图失败 {path}: {e}")
 
-# ── Playwright 核心 ───────────────────────────────────────
-def run_with_browser():
+# ── 单账号续期 ────────────────────────────────────────────
+def run_account(account: dict):
+    """对单个账号执行续期，返回 (renewed_list, skipped_list, failed_list)"""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    log(f"[网络] 直连出口 IP: {get_outbound_ip()}")
-    log(f"[网络] 代理出口 IP: {get_proxy_ip()}")
+    idx      = account["index"]
+    email    = account["email"]
+    password = account["password"]
+    tag      = f"账号{idx}({email})"
+
+    log(f"\n{'='*50}")
+    log(f"开始处理 {tag}")
+    log(f"{'='*50}")
+
+    renewed_list, skipped_list, failed_list = [], [], []
 
     with sync_playwright() as p:
-        # 启用录屏
         os.makedirs("screenshots", exist_ok=True)
         browser = p.chromium.launch(
             args=["--no-sandbox", "--disable-setuid-sandbox"],
@@ -157,151 +170,110 @@ def run_with_browser():
 
         try:
             # ── 1. 打开登录页 ─────────────────────────────
-            log(f"导航到登录页: {LOGIN_URL}")
+            log(f"[{tag}] 导航到登录页: {LOGIN_URL}")
             page.goto(LOGIN_URL, timeout=60000)
             page.wait_for_load_state("networkidle", timeout=30000)
-            screenshot(page, "01_login_page")
-
-            # 打印页面上所有 input，方便调试
-            inputs = page.evaluate("""() => {
-                return Array.from(document.querySelectorAll('input')).map(i => ({
-                    type: i.type, name: i.name, id: i.id,
-                    placeholder: i.placeholder, class: i.className.substring(0,50)
-                }));
-            }""")
-            log(f"页面 input 列表: {inputs}")
+            screenshot(page, f"acct{idx}_01_login_page")
 
             # ── 2. 填写登录表单 ───────────────────────────
-            log("填写登录表单...")
-            # 尝试多种选择器
+            log(f"[{tag}] 填写登录表单...")
             email_selectors = [
-                "input[type='email']",
-                "input[name='user']",
-                "input[name='email']",
-                "input[placeholder*='mail']",
-                "input[placeholder*='Email']",
-                "input:first-of-type",
+                "input[type='email']", "input[name='user']", "input[name='email']",
+                "input[placeholder*='mail']", "input[placeholder*='Email']", "input:first-of-type",
             ]
             email_filled = False
             for sel in email_selectors:
                 try:
                     page.wait_for_selector(sel, timeout=3000)
-                    page.fill(sel, EMAIL)
-                    log(f"邮箱字段使用选择器: {sel}")
+                    page.fill(sel, email)
+                    log(f"  邮箱字段使用选择器: {sel}")
                     email_filled = True
                     break
                 except Exception:
                     continue
 
             if not email_filled:
-                screenshot(page, "02_no_email_field")
-                raise RuntimeError("找不到邮箱输入框，已截图")
+                screenshot(page, f"acct{idx}_02_no_email_field")
+                raise RuntimeError("找不到邮箱输入框")
 
-            pwd_selectors = [
-                "input[type='password']",
-                "input[name='password']",
-            ]
-            for sel in pwd_selectors:
+            for sel in ["input[type='password']", "input[name='password']"]:
                 try:
                     page.wait_for_selector(sel, timeout=3000)
-                    page.fill(sel, PASSWORD)
-                    log(f"密码字段使用选择器: {sel}")
+                    page.fill(sel, password)
                     break
                 except Exception:
                     continue
 
-            screenshot(page, "02_form_filled")
+            screenshot(page, f"acct{idx}_02_form_filled")
 
-            # ── 3. 勾选"我不是机器人"复选框 ──────────────
-            log("点击 captcha 复选框...")
+            # ── 3. captcha ────────────────────────────────
+            log(f"[{tag}] 点击 captcha 复选框...")
             page.click("div.auth-captcha-inner", timeout=10000)
-            # 等待变成 verified 状态
             try:
-                page.wait_for_selector("div.auth-captcha-box.verified, div.auth-captcha-inner[aria-checked='true']", timeout=10000)
-                log("captcha 验证通过 ✅")
+                page.wait_for_selector(
+                    "div.auth-captcha-box.verified, div.auth-captcha-inner[aria-checked='true']",
+                    timeout=10000)
+                log(f"[{tag}] captcha 验证通过 ✅")
             except Exception:
-                log_warn("captcha 未检测到 verified 状态，继续尝试提交")
-            screenshot(page, "02b_captcha_checked")
+                log_warn(f"[{tag}] captcha 未检测到 verified，继续提交")
+            screenshot(page, f"acct{idx}_02b_captcha")
 
             # ── 4. 提交登录 ───────────────────────────────
-            log("提交登录...")
-            submit_selectors = [
-                "button[type='submit']",
-                "button:has-text('Login')",
-                "button:has-text('登录')",
-                "button:has-text('Sign in')",
-                "input[type='submit']",
-            ]
-            for sel in submit_selectors:
+            for sel in ["button[type='submit']", "button:has-text('Login')",
+                        "button:has-text('登录')", "button:has-text('Sign in')",
+                        "input[type='submit']"]:
                 try:
                     page.click(sel, timeout=3000)
-                    log(f"提交按钮使用选择器: {sel}")
                     break
                 except Exception:
                     continue
 
             page.wait_for_load_state("networkidle", timeout=30000)
-            screenshot(page, "03_after_submit")
-            log(f"提交后 URL: {page.url}")
+            screenshot(page, f"acct{idx}_03_after_submit")
 
-            # 等待跳转离开登录页
             try:
                 page.wait_for_url(lambda url: "login" not in url, timeout=20000)
-                log(f"登录成功 ✅，当前 URL: {page.url}")
+                log(f"[{tag}] 登录成功 ✅，URL: {page.url}")
             except PWTimeout:
-                screenshot(page, "03_login_timeout")
+                screenshot(page, f"acct{idx}_03_login_timeout")
                 raise RuntimeError(f"登录超时，仍在: {page.url}")
 
-            screenshot(page, "04_after_login")
+            screenshot(page, f"acct{idx}_04_after_login")
 
-            # ── 4. 获取项目列表 ───────────────────────────
-            log("通过浏览器 fetch 获取项目列表...")
+            # ── 5. 获取项目列表 ───────────────────────────
             result = page.evaluate("""async () => {
-                const r = await fetch('/api/client', {
-                    headers: {'Accept': 'application/json'}
-                });
+                const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
                 return {status: r.status, body: await r.text()};
             }""")
-            log(f"  → HTTP {result['status']}")
             if result['status'] != 200:
-                log_warn(f"  → 响应体: {result['body'][:300]}")
                 raise RuntimeError(f"获取项目列表失败 HTTP {result['status']}")
 
             data = json.loads(result['body'])
             projects = [item['attributes'] for item in data.get('data', []) if item.get('attributes')]
-            log(f"  → 找到 {len(projects)} 个项目")
+            log(f"[{tag}] 找到 {len(projects)} 个项目")
 
             if not projects:
-                log_warn("项目列表为空，无需操作")
-                ctx.close()
-                browser.close()
-                return
+                log_warn(f"[{tag}] 项目列表为空")
+                ctx.close(); browser.close()
+                return renewed_list, skipped_list, failed_list
 
-            # ── 5. 逐项目检查并续期 ──────────────────────
-            renewed_list = []
-            skipped_list = []
-            failed_list  = []
-
+            # ── 6. 逐项目续期 ────────────────────────────
             for project in projects:
                 name        = project.get("name", "未知项目")
                 identifier  = project.get("identifier", "")
                 raw_expires = project.get("expires_at")
-                log(f"[{name}] 过期数据: {raw_expires!r}")
-                remaining = parse_expires(raw_expires)
+                remaining   = parse_expires(raw_expires)
 
                 if remaining is None:
-                    log_warn(f"[{name}] 无法解析剩余时间")
-                    failed_list.append(f"{name}（无法解析过期时间）")
+                    failed_list.append(f"{tag} · {name}（无法解析过期时间）")
                     continue
 
-                log(f"[{name}] 剩余 {remaining:.2f} 天")
+                log(f"[{tag}] [{name}] 剩余 {remaining:.2f} 天")
 
                 if remaining >= RENEW_THRESHOLD_DAYS:
-                    log(f"[{name}] 无需续期")
-                    skipped_list.append(f"{name}（剩余 {remaining:.1f} 天）")
+                    skipped_list.append(f"{tag} · {name}（剩余 {remaining:.1f} 天）")
                     continue
 
-                log(f"[{name}] 开始续期...")
                 try:
                     renew_url = f"/api/client/servers/{identifier}/upgrade/renew"
                     renew_result = page.evaluate(f"""async () => {{
@@ -312,17 +284,12 @@ def run_with_browser():
                         );
                         const r = await fetch('{renew_url}', {{
                             method: 'POST',
-                            headers: {{
-                                'Accept': 'application/json',
-                                'X-XSRF-TOKEN': xsrf
-                            }}
+                            headers: {{'Accept': 'application/json', 'X-XSRF-TOKEN': xsrf}}
                         }});
                         return {{status: r.status, body: await r.text()}};
                     }}""")
-                    log(f"  → 续期 HTTP {renew_result['status']}, body: {renew_result['body'][:200]}")
 
                     if renew_result['status'] == 200:
-                        log(f"[{name}] ✅ 续期成功，等待2秒后获取新到期时间...")
                         time.sleep(2)
                         new_result = page.evaluate("""async () => {
                             const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
@@ -336,10 +303,10 @@ def run_with_browser():
                                 break
                         if new_expires:
                             new_remaining = parse_expires(new_expires)
-                            log(f"[{name}] 续期后剩余 {new_remaining:.2f} 天（新到期: {new_expires}）")
-                            renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天，续期后剩余 {new_remaining:.1f} 天）")
+                            renewed_list.append(
+                                f"{tag} · {name}（{remaining:.1f}天 → {new_remaining:.1f}天）")
                         else:
-                            renewed_list.append(f"{name}（续期前剩余 {remaining:.1f} 天）")
+                            renewed_list.append(f"{tag} · {name}（续期前 {remaining:.1f} 天）")
                     else:
                         body = renew_result['body']
                         try:
@@ -349,54 +316,64 @@ def run_with_browser():
                         raise RuntimeError(f"续期失败: {err}")
 
                 except Exception as e:
-                    log_error(f"[{name}] 续期异常: {e}")
-                    failed_list.append(f"{name}（{str(e)[:80]}）")
+                    log_error(f"[{tag}][{name}] 续期异常: {e}")
+                    failed_list.append(f"{tag} · {name}（{str(e)[:80]}）")
 
-            # ── 6. 最终截图 ───────────────────────────────
-            screenshot(page, "05_final")
+            screenshot(page, f"acct{idx}_05_final")
 
         except Exception as e:
-            screenshot(page, "99_error")
-            ctx.close()
-            browser.close()
-            raise
+            screenshot(page, f"acct{idx}_99_error")
+            ctx.close(); browser.close()
+            failed_list.append(f"{tag} · 账号级异常: {str(e)[:120]}")
+            return renewed_list, skipped_list, failed_list
 
         ctx.close()
         browser.close()
 
-        # ── 7. 汇总推送 ──────────────────────────────────
-        log("=" * 50)
-        log(f"续期成功: {len(renewed_list)} 个")
-        log(f"无需续期: {len(skipped_list)} 个")
-        log(f"失败/异常: {len(failed_list)} 个")
-
-        if renewed_list:
-            lines = ["✅ <b>ACLClouds 自动续期成功</b>", ""]
-            lines += [f"• {i}" for i in renewed_list]
-            if failed_list:
-                lines += ["", "⚠️ 以下项目失败："] + [f"• {i}" for i in failed_list]
-            lines += ["", "ACLClouds Auto Renew"]
-            send_all_push("\n".join(lines))
-        elif failed_list:
-            lines = ["❌ <b>ACLClouds 续期失败</b>", ""]
-            lines += [f"• {i}" for i in failed_list]
-            lines += ["", "ACLClouds Auto Renew"]
-            send_all_push("\n".join(lines))
-        else:
-            log("无续期操作，不发送推送")
+    return renewed_list, skipped_list, failed_list
 
 
 # ── 主入口 ────────────────────────────────────────────────
 if __name__ == "__main__":
-    if not EMAIL or not PASSWORD:
-        log_error("缺少环境变量 ACLCLOUDS_EMAIL 或 ACLCLOUDS_PASSWORD")
-        send_error_push("缺少环境变量 ACLCLOUDS_EMAIL 或 ACLCLOUDS_PASSWORD")
+    accounts = load_accounts()
+    if not accounts:
+        log_error("未找到任何账号！请设置 ACCOUNT1_EMAIL / ACCOUNT1_PASSWORD 等环境变量")
         sys.exit(1)
-    try:
-        run_with_browser()
-        log("脚本执行完毕")
-    except Exception as ex:
-        log_error("脚本失败")
-        traceback.print_exc()
-        send_error_push(str(ex)[:200])
-        sys.exit(1)
+
+    log(f"[网络] 直连出口 IP: {get_outbound_ip()}")
+    log(f"[网络] 代理出口 IP: {get_proxy_ip()}")
+    log(f"共 {len(accounts)} 个账号待处理")
+
+    all_renewed, all_skipped, all_failed = [], [], []
+
+    for account in accounts:
+        try:
+            r, s, f = run_account(account)
+            all_renewed.extend(r)
+            all_skipped.extend(s)
+            all_failed.extend(f)
+        except Exception as ex:
+            log_error(f"账号{account['index']} 顶层异常: {ex}")
+            traceback.print_exc()
+            all_failed.append(f"账号{account['index']}({account['email']}) · 顶层异常: {str(ex)[:100]}")
+
+    # ── 汇总推送 ──────────────────────────────────────────
+    log("=" * 50)
+    log(f"续期成功: {len(all_renewed)} 个")
+    log(f"无需续期: {len(all_skipped)} 个")
+    log(f"失败/异常: {len(all_failed)} 个")
+
+    if all_renewed:
+        lines = ["✅ <b>ACLClouds 自动续期成功</b>", ""]
+        lines += [f"• {i}" for i in all_renewed]
+        if all_failed:
+            lines += ["", "⚠️ 以下项目失败："] + [f"• {i}" for i in all_failed]
+        lines += ["", "ACLClouds Auto Renew"]
+        send_all_push("\n".join(lines))
+    elif all_failed:
+        lines = ["❌ <b>ACLClouds 续期失败</b>", ""]
+        lines += [f"• {i}" for i in all_failed]
+        lines += ["", "ACLClouds Auto Renew"]
+        send_all_push("\n".join(lines))
+    else:
+        log("所有账号均无需续期，不发送推送")
