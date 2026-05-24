@@ -39,15 +39,16 @@ jobs:
         run: |
           python renew.py 2>&1 | tee renew.log
 
-      - name: 上传截图（调试用）
+      - name: 上传截图和录屏
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: aclclouds-screenshots
+          name: aclclouds-debug
           path: screenshots/
           retention-days: 3
 
       - name: 删除当前 workflow 的旧 runs（保留最近2个）
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
