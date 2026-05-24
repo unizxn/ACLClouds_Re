@@ -192,7 +192,18 @@ def run_with_browser():
 
             screenshot(page, "02_form_filled")
 
-            # ── 3. 提交登录 ───────────────────────────────
+            # ── 3. 勾选"我不是机器人"复选框 ──────────────
+            log("点击 captcha 复选框...")
+            page.click("div.auth-captcha-inner", timeout=10000)
+            # 等待变成 verified 状态
+            try:
+                page.wait_for_selector("div.auth-captcha-box.verified, div.auth-captcha-inner[aria-checked='true']", timeout=10000)
+                log("captcha 验证通过 ✅")
+            except Exception:
+                log_warn("captcha 未检测到 verified 状态，继续尝试提交")
+            screenshot(page, "02b_captcha_checked")
+
+            # ── 4. 提交登录 ───────────────────────────────
             log("提交登录...")
             submit_selectors = [
                 "button[type='submit']",
