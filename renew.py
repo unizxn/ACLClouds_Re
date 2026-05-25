@@ -25,9 +25,16 @@ TG_CHAT_ID        = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
-RENEW_THRESHOLD_DAYS = 2
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
+
+# ── 续期模式说明 ──────────────────────────────────────────
+# normal : 剩余 < 2 天 时续期（普通免费账号，随时可续）
+# short  : 剩余 < 2 小时 时续期（ACLClouds 限制：到期前2小时内才能续）
+THRESHOLD = {
+    "normal": 2.0,          # 天
+    "short":  2 / 24,     # 天（= 2小时）
+}
 
 # ── 读取多账号列表 ────────────────────────────────────────
 def load_accounts():
@@ -36,7 +43,10 @@ def load_accounts():
         email    = os.environ.get(f"ACCOUNT{i}_EMAIL", "").strip()
         password = os.environ.get(f"ACCOUNT{i}_PASSWORD", "").strip()
         if email and password:
-            accounts.append({"index": i, "email": email, "password": password})
+            mode = os.environ.get(f"ACCOUNT{i}_RENEW_MODE", "normal").strip().lower()
+            if mode not in THRESHOLD:
+                mode = "normal"
+            accounts.append({"index": i, "email": email, "password": password, "mode": mode})
     return accounts
 
 # ── 日志 ─────────────────────────────────────────────────
@@ -140,10 +150,13 @@ def run_account(account: dict):
     """对单个账号执行续期，返回 (renewed_list, skipped_list, failed_list)"""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    idx      = account["index"]
-    email    = account["email"]
-    password = account["password"]
-    tag      = f"账号{idx}({email})"
+    idx       = account["index"]
+    email     = account["email"]
+    password  = account["password"]
+    mode      = account.get("mode", "normal")
+    threshold = THRESHOLD[mode]
+    tag       = f"账号{idx}({email})"
+    log(f"  续期模式: {mode}（阈值 {threshold*24:.1f} 小时）")
 
     log(f"\n{'='*50}")
     log(f"开始处理 {tag}")
