@@ -1,0 +1,73 @@
+name: ACLClouds 账号3（每5小时）
+
+on:
+  workflow_dispatch:   # cron-job.org / 手动触发
+
+jobs:
+  renew:
+    name: 账号3 续期 + 离线检测
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    timeout-minutes: 20
+
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: |
+          pip install playwright requests
+          playwright install chromium --with-deps
+
+      - name: 下载并启动 Xray 代理
+        env:
+          V2RAY_CONFIG: ${{ secrets.V2RAY_CONFIG }}
+        run: |
+          curl -sL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip xray.zip && chmod +x xray
+          echo "$V2RAY_CONFIG" > config.json
+          ./xray run -c config.json &
+          sleep 5
+          echo "代理 IP："
+          curl -s --max-time 5 --socks5 127.0.0.1:10808 ifconfig.me
+          echo ""
+
+      - name: 运行账号3脚本
+        env:
+          ACCOUNT3_EMAIL:    ${{ secrets.ACCOUNT3_EMAIL }}
+          ACCOUNT3_PASSWORD: ${{ secrets.ACCOUNT3_PASSWORD }}
+          TG_BOT_TOKEN:      ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:        ${{ secrets.TG_CHAT_ID }}
+          WXPUSHER_APPTOKEN: ${{ secrets.WXPUSHER_APPTOKEN }}
+          WXPUSHER_UID:      ${{ secrets.WXPUSHER_UID }}
+        run: |
+          python renew_account3.py 2>&1 | tee renew_account3.log
+
+      - name: 上传截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acct3-debug-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 2
+
+      - name: 清理旧 runs（保留最近3个）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WORKFLOW_ID=$(gh api repos/${{ github.repository }}/actions/workflows \
+            --jq '.workflows[] | select(.name == "${{ github.workflow }}") | .id')
+          gh api "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs" \
+            --paginate \
+            --jq '.workflow_runs[3:][] | .id' \
+            | while read id; do
+                gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$id"
+              done
