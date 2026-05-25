@@ -25,16 +25,9 @@ TG_CHAT_ID        = os.environ.get("TG_CHAT_ID", "").strip()
 WXPUSHER_APPTOKEN = os.environ.get("WXPUSHER_APPTOKEN", "").strip()
 WXPUSHER_UID      = os.environ.get("WXPUSHER_UID", "").strip()
 
+RENEW_THRESHOLD_DAYS = 2
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
-
-# ── 续期模式说明 ──────────────────────────────────────────
-# normal : 剩余 < 2 天 时续期（普通免费账号，随时可续）
-# short  : 剩余 < 2 小时 时续期（ACLClouds 限制：到期前2小时内才能续）
-THRESHOLD = {
-    "normal": 2.0,          # 天
-    "short":  1.5 / 24,     # 天（= 1.5小时）
-}
 
 # ── 读取多账号列表 ────────────────────────────────────────
 def load_accounts():
@@ -43,10 +36,7 @@ def load_accounts():
         email    = os.environ.get(f"ACCOUNT{i}_EMAIL", "").strip()
         password = os.environ.get(f"ACCOUNT{i}_PASSWORD", "").strip()
         if email and password:
-            mode = os.environ.get(f"ACCOUNT{i}_RENEW_MODE", "normal").strip().lower()
-            if mode not in THRESHOLD:
-                mode = "normal"
-            accounts.append({"index": i, "email": email, "password": password, "mode": mode})
+            accounts.append({"index": i, "email": email, "password": password})
     return accounts
 
 # ── 日志 ─────────────────────────────────────────────────
@@ -150,13 +140,10 @@ def run_account(account: dict):
     """对单个账号执行续期，返回 (renewed_list, skipped_list, failed_list)"""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    idx       = account["index"]
-    email     = account["email"]
-    password  = account["password"]
-    mode      = account.get("mode", "normal")
-    threshold = THRESHOLD[mode]
-    tag       = f"账号{idx}({email})"
-    log(f"  续期模式: {mode}（阈值 {threshold*24:.1f} 小时）")
+    idx      = account["index"]
+    email    = account["email"]
+    password = account["password"]
+    tag      = f"账号{idx}({email})"
 
     log(f"\n{'='*50}")
     log(f"开始处理 {tag}")
@@ -253,14 +240,6 @@ def run_account(account: dict):
 
             screenshot(page, f"acct{idx}_04_after_login")
 
-            # ── 等待页面JS初始化 ──────────────────────────
-            try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            time.sleep(3)
-
-
             # ── 5. 获取项目列表 ───────────────────────────
             result = page.evaluate("""async () => {
                 const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
@@ -340,31 +319,14 @@ def run_account(account: dict):
                     log_error(f"[{tag}][{name}] 续期异常: {e}")
                     failed_list.append(f"{tag} · {name}（{str(e)[:80]}）")
 
-            try:
-                screenshot(page, f"acct{idx}_05_final")
-            except Exception:
-                pass
+            screenshot(page, f"acct{idx}_05_final")
 
         except Exception as e:
-            try:
-                screenshot(page, f"acct{idx}_99_error")
-            except Exception:
-                pass
-            try:
-                if page.video:
-                    page.video.save_as(f"screenshots/acct{idx}_error_video.webm")
-            except Exception:
-                pass
+            screenshot(page, f"acct{idx}_99_error")
             ctx.close(); browser.close()
             failed_list.append(f"{tag} · 账号级异常: {str(e)[:120]}")
             return renewed_list, skipped_list, failed_list
 
-        # 等录屏保存完再关闭
-        try:
-            if page.video:
-                page.video.save_as(f"screenshots/acct{idx}_video.webm")
-        except Exception:
-            pass
         ctx.close()
         browser.close()
 
