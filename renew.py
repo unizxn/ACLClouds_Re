@@ -33,7 +33,7 @@ LOGIN_URL = f"{BASE_URL}/auth/login"
 # short  : 剩余 < 2 小时 时续期（ACLClouds 限制：到期前2小时内才能续）
 THRESHOLD = {
     "normal": 2.0,          # 天
-    "short":  2 / 24,     # 天（= 2小时）
+    "short":  1.5 / 24,     # 天（= 1.5小时）
 }
 
 # ── 读取多账号列表 ────────────────────────────────────────
@@ -340,14 +340,31 @@ def run_account(account: dict):
                     log_error(f"[{tag}][{name}] 续期异常: {e}")
                     failed_list.append(f"{tag} · {name}（{str(e)[:80]}）")
 
-            screenshot(page, f"acct{idx}_05_final")
+            try:
+                screenshot(page, f"acct{idx}_05_final")
+            except Exception:
+                pass
 
         except Exception as e:
-            screenshot(page, f"acct{idx}_99_error")
+            try:
+                screenshot(page, f"acct{idx}_99_error")
+            except Exception:
+                pass
+            try:
+                if page.video:
+                    page.video.save_as(f"screenshots/acct{idx}_error_video.webm")
+            except Exception:
+                pass
             ctx.close(); browser.close()
             failed_list.append(f"{tag} · 账号级异常: {str(e)[:120]}")
             return renewed_list, skipped_list, failed_list
 
+        # 等录屏保存完再关闭
+        try:
+            if page.video:
+                page.video.save_as(f"screenshots/acct{idx}_video.webm")
+        except Exception:
+            pass
         ctx.close()
         browser.close()
 
