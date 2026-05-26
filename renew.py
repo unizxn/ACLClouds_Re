@@ -155,30 +155,55 @@ def screenshot(page, name: str):
     os.makedirs("screenshots", exist_ok=True)
     path = f"screenshots/{name}.png"
     try:
-        # 先用JS把页面上的敏感信息替换成遮罩
         page.evaluate("""() => {
-            // 遮罩邮箱/用户名显示（顶栏用户名、表单中的邮箱值）
-            const masks = [
-                // 顶栏用户名
-                'span.username', '.user-name', '[class*="username"]',
-                '.navbar .user', '.header-user', '.user-info',
-                // 顶栏右上角账号名
-                '.text-sm.font-medium', '.account-name',
-                // 欢迎语中的用户名
-                'h1 span', 'h2 span',
+            const blur = el => { el.style.filter = 'blur(8px)'; };
+
+            // ── 1. input 值（登录表单）──────────────────
+            document.querySelectorAll('input').forEach(blur);
+
+            // ── 2. header 右侧整个用户区域 ───────────────
+            const headerSelectors = [
+                'header button', 'header [role="button"]',
+                'nav button',    'nav [role="button"]',
+                'span.username', '[class*="username"]', '[class*="user-name"]',
+                '[class*="UserName"]', '[class*="userName"]',
+                '.user-info', '.header-user', '.navbar .user',
+                '.account-name', '.text-sm.font-medium',
+                '[class*="avatar"] + *', '[class*="Avatar"] + *',
             ];
-            masks.forEach(sel => {
-                document.querySelectorAll(sel).forEach(el => {
-                    el.style.filter = 'blur(8px)';
-                });
+            headerSelectors.forEach(sel => {
+                try { document.querySelectorAll(sel).forEach(blur); } catch(e) {}
             });
-            // 遮罩所有 input 的值
-            document.querySelectorAll('input').forEach(el => {
-                el.style.filter = 'blur(8px)';
+
+            // ── 3. 顶栏整体兜底 ──────────────────────────
+            ['header', 'nav', '.topbar', '.top-bar', '#header', '#nav'].forEach(sel => {
+                try {
+                    document.querySelectorAll(sel).forEach(el => {
+                        el.querySelectorAll('span, p, a, button, div').forEach(child => {
+                            if (child.children.length === 0 && child.textContent.trim()) {
+                                blur(child);
+                            }
+                        });
+                    });
+                } catch(e) {}
             });
-            // 遮罩地址栏中的 IP（Server Information 区域）
-            document.querySelectorAll('[class*="address"], [class*="ip"]').forEach(el => {
-                el.style.filter = 'blur(8px)';
+
+            // ── 4. 项目/服务器列表中的敏感列 ───────────────
+            document.querySelectorAll('table td, table th').forEach(td => {
+                if (td.tagName !== 'TH' && /[0-9]/.test(td.textContent)) { blur(td); }
+            });
+            document.querySelectorAll(
+                '[class*="service"] [class*="name"], [class*="server"] [class*="name"],'
+                + '[class*="project"] [class*="name"], [class*="node"], [class*="identifier"],'
+                + '[class*="expire"], [class*="renew"], [class*="date"]'
+            ).forEach(blur);
+
+            // ── 5. IP 地址区域 ───────────────────────────
+            document.querySelectorAll('[class*="address"], [class*="ip"], [class*="host"]').forEach(blur);
+
+            // ── 6. Welcome 欢迎语中的用户名 ─────────────
+            document.querySelectorAll('h1, h2, h3').forEach(el => {
+                el.querySelectorAll('span, strong, b').forEach(blur);
             });
         }""")
     except Exception:
