@@ -411,18 +411,35 @@ def run():
 
             screenshot(page, "03_dashboard")
 
-            # ── 5. 等待 JS 初始化 ──────────────────────────
+            # ── 5. 等待 SPA 真正渲染完成 ──────────────────
+            # dashboard 是 SPA，networkidle 触发太早（页面还在转圈），
+            # 必须等侧边栏关键元素出现，确认前端 JS 初始化 + session 均就绪。
+            DASHBOARD_READY_SEL = (
+                "a:has-text('My services'), "
+                "a:has-text('My Services'), "
+                "nav a[href*='service'], "
+                "nav a[href*='server'], "
+                ".sidebar, aside"
+            )
             try:
-                page.wait_for_load_state("networkidle", timeout=20000)
+                page.wait_for_selector(DASHBOARD_READY_SEL, timeout=30000)
+                log("Dashboard 已就绪")
             except Exception:
-                pass
-            time.sleep(3)
+                log_warn("Dashboard 就绪选择器超时，等待 5 秒继续")
+                time.sleep(5)
 
-            # ── 6. 获取项目列表 ───────────────────────────
-            result = page.evaluate("""async () => {
-                const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
-                return {status: r.status, body: await r.text()};
-            }""")
+            # ── 6. 获取项目列表（500 时最多重试 3 次）────────
+            # 登录后台 session 有时需要额外时间建立，500 加重试兜底。
+            result = None
+            for api_attempt in range(1, 4):
+                result = page.evaluate("""async () => {
+                    const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
+                    return {status: r.status, body: await r.text()};
+                }""")
+                if result['status'] == 200:
+                    break
+                log_warn(f"获取项目列表 HTTP {result['status']}，{api_attempt}/3，等待 5 秒重试...")
+                time.sleep(5)
             if result['status'] != 200:
                 raise RuntimeError(f"获取项目列表失败 HTTP {result['status']}")
 
