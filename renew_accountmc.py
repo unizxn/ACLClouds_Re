@@ -359,15 +359,37 @@ def run():
             screenshot(page, "02_form_filled")
 
             # ── 3. captcha ────────────────────────────────
-            log("点击 captcha 复选框...")
-            try:
-                page.click("div.auth-captcha-inner", timeout=8000)
-                page.wait_for_selector(
-                    "div.auth-captcha-box.verified, div.auth-captcha-inner[aria-checked='true']",
-                    timeout=10000)
-                log("captcha ✅")
-            except Exception:
-                log_warn("captcha 未检测到 verified，继续提交")
+            # 必须等待 captcha 真正完成验证才能提交，否则服务器会返回
+            # "Captcha incorrect."。自定义 captcha 组件异步验证需要时间，
+            # 点击后轮询最多 3 次，每次给 15 秒等待 verified 态出现。
+            CAPTCHA_VERIFIED_SEL = (
+                "div.auth-captcha-box.verified, "
+                "div.auth-captcha-inner[aria-checked='true'], "
+                ":text('Vérifié'), :text('Verified'), :text('verified')"
+            )
+            captcha_ok = False
+            for attempt in range(1, 4):
+                log(f"captcha 点击尝试 {attempt}/3 ...")
+                try:
+                    page.click("div.auth-captcha-inner", timeout=8000)
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_selector(CAPTCHA_VERIFIED_SEL, timeout=15000)
+                    # 额外等待 500ms，让 token 写入完成再提交
+                    time.sleep(0.5)
+                    log(f"captcha ✅（第 {attempt} 次）")
+                    captcha_ok = True
+                    break
+                except Exception:
+                    log_warn(f"  第 {attempt} 次未检测到 verified")
+                    if attempt < 3:
+                        time.sleep(2)
+
+            if not captcha_ok:
+                screenshot(page, "02b_captcha_fail")
+                raise RuntimeError("captcha 3次均未通过，放弃登录")
+
             screenshot(page, "02b_captcha")
 
             # ── 4. 提交登录 ───────────────────────────────
