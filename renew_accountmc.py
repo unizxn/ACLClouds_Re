@@ -428,8 +428,10 @@ def run():
                 log_warn("Dashboard 就绪选择器超时，等待 5 秒继续")
                 time.sleep(5)
 
-            # ── 6. 获取项目列表（500 时最多重试 3 次）────────
-            # 登录后台 session 有时需要额外时间建立，500 加重试兜底。
+            # ── 6. 获取项目列表 ────────────────────────────
+            # /api/client 在账号无项目时有时返回 500（面板自身 bug），
+            # 先尝试最多 3 次拿到 200；若始终非 200，记录响应体后
+            # 按"项目列表为空"处理而不是抛出异常崩溃。
             result = None
             for api_attempt in range(1, 4):
                 result = page.evaluate("""async () => {
@@ -438,16 +440,30 @@ def run():
                 }""")
                 if result['status'] == 200:
                     break
-                log_warn(f"获取项目列表 HTTP {result['status']}，{api_attempt}/3，等待 5 秒重试...")
+                log_warn(f"获取项目列表 HTTP {result['status']}，"
+                         f"响应体: {result['body'][:200]}，"
+                         f"{api_attempt}/3，等待 5 秒重试...")
                 time.sleep(5)
+
             if result['status'] != 200:
-                raise RuntimeError(f"获取项目列表失败 HTTP {result['status']}")
+                # 非 200 但不直接崩溃：按空列表处理，推送告警后优雅退出
+                log_warn(f"获取项目列表始终返回 HTTP {result['status']}，"
+                         f"视为无项目，响应体: {result['body'][:400]}")
+                send_all(f"⚠️ <b>ACLClouds MC账号</b>\n\n"
+                         f"/api/client 返回 HTTP {result['status']}，账号可能无项目或接口异常。")
+                if ENABLE_VIDEO:
+                    try:
+                        page.video.save_as("screenshots/mc_video.webm")
+                    except Exception:
+                        pass
+                ctx.close()
+                browser.close()
+                return renewed_list, offline_list, skipped_list, failed_list
 
             data     = json.loads(result['body'])
             projects = [item['attributes'] for item in data.get('data', []) if item.get('attributes')]
             log(f"找到 {len(projects)} 个项目")
 
-            # Fix #4: projects 为空时走此分支，四个列表已在外部初始化，汇总推送照常执行
             if not projects:
                 log_warn("项目列表为空")
                 send_all("⚠️ <b>ACLClouds MC账号</b>\n\n项目列表为空，请检查账号！")
