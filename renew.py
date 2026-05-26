@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 ACLClouds 自动续期脚本 (Playwright 全程浏览器版 · 多账号)
-支持最多 3 个账号，通过编号 Secret 区分：
+支持最多 4 个账号，通过编号 Secret 区分：
   ACCOUNT1_EMAIL / ACCOUNT1_PASSWORD
   ACCOUNT2_EMAIL / ACCOUNT2_PASSWORD
   ACCOUNT3_EMAIL / ACCOUNT3_PASSWORD（可选）
+  ACCOUNT4_EMAIL / ACCOUNT4_PASSWORD（可选）
 """
 
 import os
@@ -16,8 +17,10 @@ import traceback
 from urllib.request import Request, urlopen
 
 # ── 代理配置 ──────────────────────────────────────────────
-# v2ray/Xray 本地 SOCKS5 代理
 PROXY_SERVER = "socks5://127.0.0.1:10808"
+
+# ── 录屏开关：true=开启录屏，false=关闭录屏 ──────────────
+ENABLE_VIDEO = os.environ.get("ENABLE_VIDEO", "false").strip().lower() == "true"
 
 # ── 推送凭据（全局共用） ──────────────────────────────────
 TG_BOT_TOKEN      = os.environ.get("TG_BOT_TOKEN", "").strip()
@@ -29,14 +32,34 @@ RENEW_THRESHOLD_DAYS = 2
 BASE_URL  = "https://dash.aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
 
+# ── 脱敏工具 ──────────────────────────────────────────────
+def mask_email(email: str) -> str:
+    """abc@example.com → a**@e******.com"""
+    if not email or "@" not in email:
+        return "***"
+    local, domain = email.split("@", 1)
+    local_m  = local[0] + "**" if len(local) > 1 else "**"
+    parts    = domain.split(".")
+    domain_m = parts[0][0] + "*" * (len(parts[0]) - 1) if parts[0] else "***"
+    suffix   = "." + ".".join(parts[1:]) if len(parts) > 1 else ""
+    return f"{local_m}@{domain_m}{suffix}"
+
+def mask_ip(ip: str) -> str:
+    """208.77.246.23 → 208.77.*.*"""
+    parts = ip.strip().split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.*.*"
+    return "***"
+
 # ── 读取多账号列表 ────────────────────────────────────────
 def load_accounts():
     accounts = []
-    for i in range(1, 4):           # 支持 1~3 个账号
+    for i in range(1, 5):   # 支持 1~4 个账号
         email    = os.environ.get(f"ACCOUNT{i}_EMAIL", "").strip()
         password = os.environ.get(f"ACCOUNT{i}_PASSWORD", "").strip()
         if email and password:
-            accounts.append({"index": i, "email": email, "password": password})
+            accounts.append({"index": i, "email": email, "password": password,
+                             "email_masked": mask_email(email)})
     return accounts
 
 # ── 日志 ─────────────────────────────────────────────────
@@ -49,7 +72,8 @@ def get_outbound_ip():
         data = urlopen("https://cloudflare.com/cdn-cgi/trace", timeout=5).read().decode()
         for line in data.splitlines():
             if line.startswith("ip="):
-                return line.strip()
+                raw = line.strip().replace("ip=", "")
+                return f"ip={mask_ip(raw)}"
     except Exception as e:
         return f"ip=获取失败({e})"
     return "ip=未知"
@@ -61,7 +85,8 @@ def get_proxy_ip():
             ["curl", "-s", "--max-time", "5", "--socks5", "127.0.0.1:10808", "ifconfig.me"],
             capture_output=True, text=True, timeout=10
         )
-        return result.stdout.strip() if result.returncode == 0 else "获取失败"
+        raw = result.stdout.strip()
+        return mask_ip(raw) if result.returncode == 0 else "获取失败"
     except Exception as e:
         return f"获取失败({e})"
 
@@ -125,10 +150,39 @@ def parse_expires(text):
     total = days + hours / 24 + minutes / 1440
     return total if total > 0 else None
 
-# ── 截图工具 ──────────────────────────────────────────────
+# ── 截图工具（涂抹敏感区域）────────────────────────────────
 def screenshot(page, name: str):
     os.makedirs("screenshots", exist_ok=True)
     path = f"screenshots/{name}.png"
+    try:
+        # 先用JS把页面上的敏感信息替换成遮罩
+        page.evaluate("""() => {
+            // 遮罩邮箱/用户名显示（顶栏用户名、表单中的邮箱值）
+            const masks = [
+                // 顶栏用户名
+                'span.username', '.user-name', '[class*="username"]',
+                '.navbar .user', '.header-user', '.user-info',
+                // 顶栏右上角账号名
+                '.text-sm.font-medium', '.account-name',
+                // 欢迎语中的用户名
+                'h1 span', 'h2 span',
+            ];
+            masks.forEach(sel => {
+                document.querySelectorAll(sel).forEach(el => {
+                    el.style.filter = 'blur(8px)';
+                });
+            });
+            // 遮罩所有 input 的值
+            document.querySelectorAll('input').forEach(el => {
+                el.style.filter = 'blur(8px)';
+            });
+            // 遮罩地址栏中的 IP（Server Information 区域）
+            document.querySelectorAll('[class*="address"], [class*="ip"]').forEach(el => {
+                el.style.filter = 'blur(8px)';
+            });
+        }""")
+    except Exception:
+        pass
     try:
         page.screenshot(path=path, full_page=True)
         log(f"截图已保存: {path}")
@@ -140,10 +194,11 @@ def run_account(account: dict):
     """对单个账号执行续期，返回 (renewed_list, skipped_list, failed_list)"""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    idx      = account["index"]
-    email    = account["email"]
-    password = account["password"]
-    tag      = f"账号{idx}({email})"
+    idx          = account["index"]
+    email        = account["email"]
+    password     = account["password"]
+    email_masked = account["email_masked"]
+    tag          = f"账号{idx}({email_masked})"   # 日志用脱敏邮箱
 
     log(f"\n{'='*50}")
     log(f"开始处理 {tag}")
@@ -157,15 +212,21 @@ def run_account(account: dict):
             args=["--no-sandbox", "--disable-setuid-sandbox"],
             proxy={"server": PROXY_SERVER},
         )
-        ctx = browser.new_context(
+
+        # 录屏开关
+        ctx_kwargs = dict(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/148.0.0.0 Safari/537.36",
             locale="zh-CN",
-            record_video_dir="screenshots/",
-            record_video_size={"width": 1280, "height": 800},
         )
+        if ENABLE_VIDEO:
+            ctx_kwargs["record_video_dir"]  = "screenshots/"
+            ctx_kwargs["record_video_size"] = {"width": 1280, "height": 800}
+            log(f"[{tag}] 录屏已开启")
+
+        ctx  = browser.new_context(**ctx_kwargs)
         page = ctx.new_page()
 
         try:
@@ -240,7 +301,14 @@ def run_account(account: dict):
 
             screenshot(page, f"acct{idx}_04_after_login")
 
-            # ── 5. 获取项目列表 ───────────────────────────
+            # ── 5. 等待页面JS初始化完成 ───────────────────
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            time.sleep(3)
+
+            # ── 6. 获取项目列表 ───────────────────────────
             result = page.evaluate("""async () => {
                 const r = await fetch('/api/client', {headers: {'Accept': 'application/json'}});
                 return {status: r.status, body: await r.text()};
@@ -254,10 +322,15 @@ def run_account(account: dict):
 
             if not projects:
                 log_warn(f"[{tag}] 项目列表为空")
+                if ENABLE_VIDEO:
+                    try:
+                        page.video.save_as(f"screenshots/acct{idx}_video.webm")
+                    except Exception:
+                        pass
                 ctx.close(); browser.close()
                 return renewed_list, skipped_list, failed_list
 
-            # ── 6. 逐项目续期 ────────────────────────────
+            # ── 7. 逐项目续期 ────────────────────────────
             for project in projects:
                 name        = project.get("name", "未知项目")
                 identifier  = project.get("identifier", "")
@@ -319,14 +392,31 @@ def run_account(account: dict):
                     log_error(f"[{tag}][{name}] 续期异常: {e}")
                     failed_list.append(f"{tag} · {name}（{str(e)[:80]}）")
 
-            screenshot(page, f"acct{idx}_05_final")
+            try:
+                screenshot(page, f"acct{idx}_05_final")
+            except Exception:
+                pass
 
         except Exception as e:
-            screenshot(page, f"acct{idx}_99_error")
+            try:
+                screenshot(page, f"acct{idx}_99_error")
+            except Exception:
+                pass
+            if ENABLE_VIDEO:
+                try:
+                    page.video.save_as(f"screenshots/acct{idx}_error_video.webm")
+                except Exception:
+                    pass
             ctx.close(); browser.close()
             failed_list.append(f"{tag} · 账号级异常: {str(e)[:120]}")
             return renewed_list, skipped_list, failed_list
 
+        # 录屏保存完再关闭
+        if ENABLE_VIDEO:
+            try:
+                page.video.save_as(f"screenshots/acct{idx}_video.webm")
+            except Exception:
+                pass
         ctx.close()
         browser.close()
 
@@ -343,6 +433,7 @@ if __name__ == "__main__":
     log(f"[网络] 直连出口 IP: {get_outbound_ip()}")
     log(f"[网络] 代理出口 IP: {get_proxy_ip()}")
     log(f"共 {len(accounts)} 个账号待处理")
+    log(f"录屏: {'开启' if ENABLE_VIDEO else '关闭'}")
 
     all_renewed, all_skipped, all_failed = [], [], []
 
@@ -353,9 +444,10 @@ if __name__ == "__main__":
             all_skipped.extend(s)
             all_failed.extend(f)
         except Exception as ex:
+            em = account["email_masked"]
             log_error(f"账号{account['index']} 顶层异常: {ex}")
             traceback.print_exc()
-            all_failed.append(f"账号{account['index']}({account['email']}) · 顶层异常: {str(ex)[:100]}")
+            all_failed.append(f"账号{account['index']}({em}) · 顶层异常: {str(ex)[:100]}")
 
     # ── 汇总推送 ──────────────────────────────────────────
     log("=" * 50)
