@@ -17,6 +17,9 @@ from urllib.request import Request, urlopen
 # ── 代理配置 ──────────────────────────────────────────────
 PROXY_SERVER = "socks5://127.0.0.1:10808"
 
+# ── 录屏开关 ──────────────────────────────────────────────
+ENABLE_VIDEO = os.environ.get("ENABLE_VIDEO", "false").strip().lower() == "true"
+
 # ── 账号3 凭据 ────────────────────────────────────────────
 EMAIL    = os.environ.get("ACCOUNT3_EMAIL", "").strip()
 PASSWORD = os.environ.get("ACCOUNT3_PASSWORD", "").strip()
@@ -244,15 +247,18 @@ def run():
             args=["--no-sandbox", "--disable-setuid-sandbox"],
             proxy={"server": PROXY_SERVER},
         )
-        ctx = browser.new_context(
+        ctx_kwargs = dict(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/148.0.0.0 Safari/537.36",
             locale="zh-CN",
-            record_video_dir="screenshots/",
-            record_video_size={"width": 1280, "height": 800},
         )
+        if ENABLE_VIDEO:
+            ctx_kwargs["record_video_dir"]  = "screenshots/"
+            ctx_kwargs["record_video_size"] = {"width": 1280, "height": 800}
+            log("录屏已开启")
+        ctx = browser.new_context(**ctx_kwargs)
         page = ctx.new_page()
 
         try:
@@ -420,14 +426,27 @@ def run():
                     log_error(f"  续期异常: {e}")
                     failed_list.append(f"{name}（{str(e)[:80]}）")
 
+            try:
             screenshot(page, "03_final")
+        except Exception:
+            pass
 
         except Exception as e:
             screenshot(page, "99_error")
             ctx.close(); browser.close()
             send_all(f"❌ <b>ACLClouds 账号3 脚本异常</b>\n\n{str(e)[:200]}")
+            if ENABLE_VIDEO:
+                try:
+                    page.video.save_as("screenshots/error_video.webm")
+                except Exception:
+                    pass
             raise
 
+        if ENABLE_VIDEO:
+            try:
+                page.video.save_as("screenshots/video.webm")
+            except Exception:
+                pass
         ctx.close()
         browser.close()
 
