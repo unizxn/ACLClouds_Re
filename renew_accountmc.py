@@ -153,29 +153,76 @@ def fmt_remaining(days: float) -> str:
         return f"{h}h {m}min" if m else f"{h}h"
     return f"{m}min"
 
-# ── 截图（带 JS blur 脱敏，Fix #2）───────────────────────
+# ── 截图（带 JS blur 脱敏）──────────────────────────────
 def screenshot(page, name: str):
     os.makedirs("screenshots", exist_ok=True)
     path = f"screenshots/{name}.png"
     try:
-        # 遮罩所有敏感信息（与 renew.py 完全一致）
         page.evaluate("""() => {
-            const masks = [
-                'span.username', '.user-name', '[class*="username"]',
-                '.navbar .user', '.header-user', '.user-info',
-                '.text-sm.font-medium', '.account-name',
-                'h1 span', 'h2 span',
+            const blur = el => { el.style.filter = 'blur(8px)'; };
+
+            // ── 1. input 值（登录表单）──────────────────
+            document.querySelectorAll('input').forEach(blur);
+
+            // ── 2. header 右侧整个用户区域 ───────────────
+            // ACLClouds 新版面板：右上角是一个 button/div 包含头像+用户名+箭头
+            const headerSelectors = [
+                // 精确匹配包含用户名的 header 按钮/容器
+                'header button', 'header [role="button"]',
+                'nav button',    'nav [role="button"]',
+                // 通用类名猜测（兼容旧版）
+                'span.username', '[class*="username"]', '[class*="user-name"]',
+                '[class*="UserName"]', '[class*="userName"]',
+                '.user-info', '.header-user', '.navbar .user',
+                '.account-name', '.text-sm.font-medium',
+                // 圆形头像旁边的文字节点容器
+                '[class*="avatar"] + *', '[class*="Avatar"] + *',
             ];
-            masks.forEach(sel => {
-                document.querySelectorAll(sel).forEach(el => {
-                    el.style.filter = 'blur(8px)';
-                });
+            headerSelectors.forEach(sel => {
+                try {
+                    document.querySelectorAll(sel).forEach(blur);
+                } catch(e) {}
             });
-            document.querySelectorAll('input').forEach(el => {
-                el.style.filter = 'blur(8px)';
+
+            // ── 3. 顶栏整体兜底：遮罩所有 header/nav 文字 ─
+            // 防止上面 class 猜测全部失败时用户名仍然暴露
+            ['header', 'nav', '.topbar', '.top-bar', '#header', '#nav'].forEach(sel => {
+                try {
+                    document.querySelectorAll(sel).forEach(el => {
+                        // 只遮罩包含纯文字的叶节点，不整体模糊影响截图可读性
+                        el.querySelectorAll('span, p, a, button, div').forEach(child => {
+                            if (child.children.length === 0 && child.textContent.trim()) {
+                                blur(child);
+                            }
+                        });
+                    });
+                } catch(e) {}
             });
-            document.querySelectorAll('[class*="address"], [class*="ip"]').forEach(el => {
-                el.style.filter = 'blur(8px)';
+
+            // ── 4. 项目/服务器列表中的敏感列 ───────────────
+            // 表格：项目名、ID、IP、到期日
+            const sensitiveColKeywords = ['id', 'name', 'host', 'ip', 'addr', 'renew', 'expire', 'date'];
+            document.querySelectorAll('table td, table th').forEach(td => {
+                const text = td.textContent.toLowerCase();
+                const isHeader = td.tagName === 'TH';
+                // 非表头且内容疑似敏感值（短字符串、含数字/点/日期）就遮罩
+                if (!isHeader && /[0-9]/.test(td.textContent)) {
+                    blur(td);
+                }
+            });
+            // 非表格形式的列表行（卡片式）
+            document.querySelectorAll(
+                '[class*="service"] [class*="name"], [class*="server"] [class*="name"],'
+                + '[class*="project"] [class*="name"], [class*="node"], [class*="identifier"],'
+                + '[class*="expire"], [class*="renew"], [class*="date"]'
+            ).forEach(blur);
+
+            // ── 5. IP 地址区域 ───────────────────────────
+            document.querySelectorAll('[class*="address"], [class*="ip"], [class*="host"]').forEach(blur);
+
+            // ── 6. Welcome 欢迎语中的用户名 ─────────────
+            document.querySelectorAll('h1, h2, h3').forEach(el => {
+                el.querySelectorAll('span, strong, b').forEach(blur);
             });
         }""")
     except Exception:
