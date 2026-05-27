@@ -34,7 +34,7 @@ LOGIN_URL = f"{BASE_URL}/auth/login"
 
 # ── 脱敏工具 ──────────────────────────────────────────────
 def mask_email(email: str) -> str:
-    """abc@example.com → a**@e******.com"""
+    """abc@example.com → a**@e******.*o*"""
     if not email or "@" not in email:
         return "***"
     local, domain = email.split("@", 1)
@@ -45,7 +45,7 @@ def mask_email(email: str) -> str:
     return f"{local_m}@{domain_m}{suffix}"
 
 def mask_ip(ip: str) -> str:
-    """208.77.246.23 → 208.77.*.*"""
+    """208.77.246.23 → *0*.**.*.*"""
     parts = ip.strip().split(".")
     if len(parts) == 4:
         return f"{parts[0]}.{parts[1]}.*.*"
